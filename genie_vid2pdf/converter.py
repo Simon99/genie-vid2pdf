@@ -15,10 +15,13 @@ def video_to_pdf(
     interval: float = 30.0,
     scene_threshold: float = 0.3,
     language: str = "zh-Hans",
+    transcript_path: str = None,
     progress_callback=None,
 ) -> dict:
     """Convert a video file to PDF with screenshots and subtitles.
 
+    transcript_path: optional path to existing transcript (.json or .srt)
+                     to skip whisper re-run.
     Returns {"pdf": str, "frames": int, "segments": int}.
     """
     video_path = str(video_path)
@@ -29,10 +32,16 @@ def video_to_pdf(
         burned_dir = Path(tmpdir) / "burned"
         burned_dir.mkdir()
 
-        # Step 1: Transcribe audio
+        # Step 1: Transcribe audio (or load existing)
         if progress_callback:
             progress_callback("transcribing", 0)
-        segments = transcribe_audio(video_path, language=language)
+
+        if transcript_path:
+            import json
+            with open(transcript_path, "r", encoding="utf-8") as f:
+                segments = json.load(f)
+        else:
+            segments = transcribe_audio(video_path, language=language)
 
         # Step 2: Extract screenshots at scene changes + intervals
         if progress_callback:
