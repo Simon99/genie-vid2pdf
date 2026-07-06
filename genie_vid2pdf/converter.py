@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import tempfile
+import shutil
 from pathlib import Path
 
 from PIL import Image
@@ -37,11 +37,13 @@ def video_to_pdf(
     video_path = str(video_path)
     output_pdf = str(output_pdf)
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        frames_dir = Path(tmpdir) / "frames"
-        burned_dir = Path(tmpdir) / "burned"
-        burned_dir.mkdir()
+    work_dir = Path(output_pdf).parent / ("_vid2pdf_work_%s" % Path(output_pdf).stem)
+    frames_dir = work_dir / "frames"
+    burned_dir = work_dir / "burned"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    burned_dir.mkdir(parents=True, exist_ok=True)
 
+    try:
         # Step 1: Transcribe audio (or load existing)
         if progress_callback:
             progress_callback("transcribing", 0)
@@ -84,11 +86,14 @@ def video_to_pdf(
             if progress_callback:
                 progress_callback("burning_subtitles", 0.5 + 0.3 * (i + 1) / len(screenshots))
 
-        # Step 4: Combine frames into PDF
+        # Step 4: Combine frames into PDF (batch to avoid too-many-open-files)
         if progress_callback:
             progress_callback("generating_pdf", 0.8)
 
         _frames_to_pdf(burned_frames, output_pdf)
+
+    finally:
+        shutil.rmtree(str(work_dir), ignore_errors=True)
 
     return {
         "pdf": output_pdf,
@@ -99,7 +104,6 @@ def video_to_pdf(
 
 
 def _collect_scene_text(segments: list[dict], scene_start: float, scene_end: float = None) -> str:
-    """Collect all transcript text that falls within a scene's time range."""
     relevant = []
     for seg in segments:
         if seg["end"] < scene_start:
@@ -111,65 +115,60 @@ def _collect_scene_text(segments: list[dict], scene_start: float, scene_end: flo
 
 
 def _split_into_pages(text: str) -> list[str]:
-    """Split text into chunks of max MAX_LINES lines x MAX_CHARS_PER_LINE chars.
-
-    Each chunk becomes one PDF page (same screenshot, different subtitle).
-    """
-    # First, wrap all text into lines
     all_lines = _wrap_text(text)
-
-    # Group lines into pages of MAX_LINES each
     pages = []
     for i in range(0, len(all_lines), MAX_LINES):
         page_lines = all_lines[i:i + MAX_LINES]
         pages.append("\n".join(page_lines))
-
     return pages if pages else [""]
 
 
 def _wrap_text(text: str) -> list[str]:
-    """Wrap text into lines of MAX_CHARS_PER_LINE, breaking at punctuation/spaces."""
     lines = []
     remaining = text.strip()
-
     while remaining:
         if len(remaining) <= MAX_CHARS_PER_LINE:
             lines.append(remaining)
             break
-
         cut = remaining[:MAX_CHARS_PER_LINE]
         best_pos = -1
         for sep in ["。", "，", "、", "；", "？", "！", " ", ".", ",", "?", "!"]:
             pos = cut.rfind(sep)
             if pos > MAX_CHARS_PER_LINE // 3:
                 best_pos = max(best_pos, pos)
-
         if best_pos > 0:
             lines.append(remaining[:best_pos + 1].rstrip())
             remaining = remaining[best_pos + 1:].lstrip()
         else:
             lines.append(cut)
             remaining = remaining[MAX_CHARS_PER_LINE:].lstrip()
-
     return lines
 
 
-def _frames_to_pdf(frame_paths: list[str], output_pdf: str):
-    """Combine frame images into a single PDF."""
-    images = []
-    for path in frame_paths:
-        try:
-            img = Image.open(path)
-            if img.mode != "RGB":
-                img = img.convert("RGB")
-            images.append(img)
-        except Exception:
-            continue
+def _frames_to_pdf(frame_paths: list[str], output_pdf: str, batch_size: int = 50):
+    """Combine frame images into PDF, processing in batches to avoid fd exhaustion."""
+    all_images = []
 
-    if images:
-        images[0].save(
+    for i in range(0, len(frame_paths), batch_size):
+        batch = frame_paths[i:i + batch_size]
+        for path in batch:
+            try:
+                img = Image.open(path)
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                # Copy pixel data so we can close the file handle
+                img_copy = img.copy()
+                img.close()
+                all_images.append(img_copy)
+            except Exception:
+                continue
+
+    if all_images:
+        all_images[0].save(
             output_pdf, "PDF",
             resolution=100.0,
             save_all=True,
-            append_images=images[1:]
+            append_images=all_images[1:]
         )
+        for img in all_images:
+            img.close()
