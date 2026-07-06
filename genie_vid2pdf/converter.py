@@ -79,8 +79,14 @@ def video_to_pdf(
     }
 
 
-def _get_subtitle_for_time(segments: list[dict], time: float, window: float) -> str:
-    """Find subtitle segments that overlap with a time window."""
+def _get_subtitle_for_time(
+    segments: list[dict], time: float, window: float,
+    max_chars_per_line: int = 30, max_lines: int = 2,
+) -> str:
+    """Find subtitle segments that overlap with a time window.
+
+    Truncates to max_lines lines of max_chars_per_line characters each.
+    """
     relevant = []
     window_end = time + window
 
@@ -91,7 +97,28 @@ def _get_subtitle_for_time(segments: list[dict], time: float, window: float) -> 
             break
         relevant.append(seg["text"])
 
-    return " ".join(relevant) if relevant else ""
+    if not relevant:
+        return ""
+
+    full_text = " ".join(relevant)
+
+    # Wrap into lines
+    lines = []
+    while full_text and len(lines) < max_lines:
+        if len(full_text) <= max_chars_per_line:
+            lines.append(full_text)
+            break
+        cut = full_text[:max_chars_per_line]
+        # Try to break at a space/punctuation
+        for sep in [" ", "，", "。", "、", "；"]:
+            pos = cut.rfind(sep)
+            if pos > max_chars_per_line // 2:
+                cut = full_text[:pos + 1]
+                break
+        lines.append(cut.rstrip())
+        full_text = full_text[len(cut):].lstrip()
+
+    return "\n".join(lines)
 
 
 def _frames_to_pdf(frame_paths: list[str], output_pdf: str):
