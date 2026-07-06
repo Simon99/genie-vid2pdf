@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import json
+import logging
 import shutil
 from pathlib import Path
 
 from PIL import Image
 
 from genie_core.audio import transcribe_audio
+from genie_core.audio.loader import load_transcript
 from genie_core.video.screenshot import extract_screenshots, burn_subtitle
 
 
@@ -49,8 +50,7 @@ def video_to_pdf(
             progress_callback("transcribing", 0)
 
         if transcript_path:
-            with open(transcript_path, "r", encoding="utf-8") as f:
-                segments = json.load(f)
+            segments = load_transcript(transcript_path)
         else:
             segments = transcribe_audio(video_path, language=language)
 
@@ -69,24 +69,39 @@ def video_to_pdf(
 
         burned_frames = []
         for i, shot in enumerate(screenshots):
+            # First scene also owns any speech before its capture time, so
+            # midpoint assignment never drops leading segments.
+            scene_start = shot["time"] if i > 0 else 0.0
             next_time = screenshots[i + 1]["time"] if i + 1 < len(screenshots) else None
-            scene_text = _collect_scene_text(segments, shot["time"], next_time)
+            scene_text = _collect_scene_text(segments, scene_start, next_time)
 
             if not scene_text:
                 burned_frames.append(shot["path"])
             else:
                 subtitle_chunks = _split_into_pages(scene_text)
+                fallback_added = False
                 for ci, chunk in enumerate(subtitle_chunks):
                     out_file = str(burned_dir / ("burned_%05d_%02d.png" % (i, ci)))
                     success = burn_subtitle(
                         video_path, shot["time"], chunk, out_file
                     )
-                    burned_frames.append(out_file if success else shot["path"])
+                    if success:
+                        burned_frames.append(out_file)
+                    else:
+                        logging.warning(
+                            "burn_subtitle failed for scene %d chunk %d (t=%.1fs); "
+                            "falling back to raw frame%s",
+                            i, ci, shot["time"],
+                            " (already added, skipping duplicate)" if fallback_added else "",
+                        )
+                        if not fallback_added:
+                            burned_frames.append(shot["path"])
+                            fallback_added = True
 
             if progress_callback:
                 progress_callback("burning_subtitles", 0.5 + 0.3 * (i + 1) / len(screenshots))
 
-        # Step 4: Combine frames into PDF (batch to avoid too-many-open-files)
+        # Step 4: Combine frames into PDF (streamed one image at a time)
         if progress_callback:
             progress_callback("generating_pdf", 0.8)
 
@@ -104,12 +119,18 @@ def video_to_pdf(
 
 
 def _collect_scene_text(segments: list[dict], scene_start: float, scene_end: float = None) -> str:
+    """Collect segment texts belonging to [scene_start, scene_end).
+
+    A segment straddling a scene boundary is assigned to exactly one scene
+    by its midpoint, so it is never duplicated across adjacent scenes.
+    """
     relevant = []
     for seg in segments:
-        if seg["end"] < scene_start:
+        midpoint = (seg["start"] + seg["end"]) / 2.0
+        if midpoint < scene_start:
             continue
-        if scene_end is not None and seg["start"] >= scene_end:
-            break
+        if scene_end is not None and midpoint >= scene_end:
+            continue
         relevant.append(seg["text"])
     return " ".join(relevant) if relevant else ""
 
@@ -145,30 +166,46 @@ def _wrap_text(text: str) -> list[str]:
     return lines
 
 
-def _frames_to_pdf(frame_paths: list[str], output_pdf: str, batch_size: int = 50):
-    """Combine frame images into PDF, processing in batches to avoid fd exhaustion."""
-    all_images = []
+def _frames_to_pdf(frame_paths: list[str], output_pdf: str):
+    """Combine frame images into PDF.
 
-    for i in range(0, len(frame_paths), batch_size):
-        batch = frame_paths[i:i + batch_size]
-        for path in batch:
+    Images are opened lazily one at a time via a generator (each file handle
+    is closed as soon as the pixel data is copied, avoiding fd exhaustion)
+    instead of accumulating every decoded frame up front.
+
+    Raises RuntimeError if no page could be produced (empty frame list or
+    every frame failed to load), instead of silently returning without a PDF.
+    """
+    def _open_rgb(path: str) -> Image.Image:
+        # Copy pixel data so the file handle can be closed immediately.
+        with Image.open(path) as img:
+            if img.mode != "RGB":
+                return img.convert("RGB")
+            return img.copy()
+
+    def _iter_images():
+        for page_no, path in enumerate(frame_paths, start=1):
             try:
-                img = Image.open(path)
-                if img.mode != "RGB":
-                    img = img.convert("RGB")
-                # Copy pixel data so we can close the file handle
-                img_copy = img.copy()
-                img.close()
-                all_images.append(img_copy)
-            except Exception:
-                continue
+                yield _open_rgb(path)
+            except Exception as exc:
+                logging.warning(
+                    "Skipping PDF page %d: failed to load frame %s (%s)",
+                    page_no, path, exc,
+                )
 
-    if all_images:
-        all_images[0].save(
+    images = _iter_images()
+    first = next(images, None)
+    if first is None:
+        raise RuntimeError(
+            "No PDF pages could be generated for %s: %d frame path(s), "
+            "all empty or failed to load" % (output_pdf, len(frame_paths))
+        )
+    try:
+        first.save(
             output_pdf, "PDF",
             resolution=100.0,
             save_all=True,
-            append_images=all_images[1:]
+            append_images=images,
         )
-        for img in all_images:
-            img.close()
+    finally:
+        first.close()
