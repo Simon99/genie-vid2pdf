@@ -12,6 +12,8 @@ def main():
     parser.add_argument("--interval", type=float, default=30.0, help="Timed capture interval in seconds (default: 30)")
     parser.add_argument("--threshold", type=float, default=0.3, help="Scene change threshold 0-1 (default: 0.3)")
     parser.add_argument("--language", default="zh", help="Whisper language code (default: zh)")
+    parser.add_argument("--transcript", default=None,
+                        help="Existing transcript (.json/.srt) to reuse, skipping whisper")
 
     args = parser.parse_args()
 
@@ -39,6 +41,7 @@ def main():
         interval=args.interval,
         scene_threshold=args.threshold,
         language=args.language,
+        transcript_path=args.transcript,
         progress_callback=on_progress,
     )
     print(f"\nDone! PDF: {result['pdf']} ({result['frames']} frames, {result['segments']} segments)")
