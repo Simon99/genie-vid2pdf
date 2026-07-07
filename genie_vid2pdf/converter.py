@@ -20,7 +20,7 @@ def video_to_pdf(
     output_pdf: str,
     interval: float = 30.0,
     scene_threshold: float = 0.3,
-    language: str = "zh-Hans",
+    language: str = "zh",
     transcript_path: str = None,
     progress_callback=None,
 ) -> dict:

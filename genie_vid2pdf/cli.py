@@ -11,7 +11,7 @@ def main():
     parser.add_argument("-o", "--output", help="Output PDF path (default: <input>.pdf)")
     parser.add_argument("--interval", type=float, default=30.0, help="Timed capture interval in seconds (default: 30)")
     parser.add_argument("--threshold", type=float, default=0.3, help="Scene change threshold 0-1 (default: 0.3)")
-    parser.add_argument("--language", default="zh-Hans", help="Speech recognition language (default: zh-Hans)")
+    parser.add_argument("--language", default="zh", help="Whisper language code (default: zh)")
 
     args = parser.parse_args()
 
